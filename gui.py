@@ -7,8 +7,8 @@ ROOT = Path(__file__).resolve().parent
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-from PySide6.QtCore import Qt, QTimer, QObject, Signal, QThread, QSettings
-from PySide6.QtGui import QAction, QCloseEvent
+from PySide6.QtCore import Qt, QRect, QTimer, QObject, Signal, QThread, QSettings
+from PySide6.QtGui import QAction, QCloseEvent, QColor, QIcon, QPainter, QPen, QPixmap
 from PySide6.QtWidgets import (
     QApplication,
     QComboBox,
@@ -19,7 +19,6 @@ from PySide6.QtWidgets import (
     QMessageBox,
     QPushButton,
     QSizePolicy,
-    QStyle,
     QSystemTrayIcon,
     QTextEdit,
     QVBoxLayout,
@@ -70,6 +69,24 @@ def build_grounded_prompt(snippet: str, question: str, passages: list[dict]) -> 
     )
 
 
+def _build_tray_icon(active: bool) -> QIcon:
+    pixmap = QPixmap(20, 16)
+    pixmap.fill(Qt.transparent)
+    painter = QPainter(pixmap)
+    painter.setRenderHint(QPainter.Antialiasing)
+    color = QColor("#1c1c1c")
+    painter.setPen(QPen(color, 1.4))
+    painter.setBrush(color if active else Qt.NoBrush)
+    painter.drawRoundedRect(QRect(2, 1, 16, 14), 1, 1)
+    spine_color = QColor("#ffffff") if active else color
+    painter.setPen(QPen(spine_color, 1.2))
+    painter.drawLine(5, 2, 5, 14)
+    painter.end()
+    icon = QIcon(pixmap)
+    icon.setIsMask(True)
+    return icon
+
+
 class LLMWorker(QObject):
     finished = Signal(str)
     failed = Signal(str)
@@ -103,7 +120,27 @@ class ClipboardMonitor(QObject):
         self._timer = QTimer(self)
         self._timer.setInterval(POLL_INTERVAL_MS)
         self._timer.timeout.connect(self._poll)
+        self._active = False
+
+    @property
+    def is_active(self) -> bool:
+        return self._active
+
+    def start(self) -> None:
+        if self._active:
+            return
+        try:
+            self._last = self._clip.text() or ""
+        except Exception:
+            self._last = ""
         self._timer.start()
+        self._active = True
+
+    def stop(self) -> None:
+        if not self._active:
+            return
+        self._timer.stop()
+        self._active = False
 
     def _poll(self) -> None:
         try:
@@ -403,20 +440,41 @@ def main() -> int:
     app.setApplicationName("Reading Assistant")
     app.setOrganizationName("ReadingAssistant")
 
+    settings = QSettings("ReadingAssistant", "FloatingPopup")
+    initial_monitoring = bool(settings.value("monitoring", True, type=bool))
+
+    monitor = ClipboardMonitor(app)
+
     tray = QSystemTrayIcon(app)
-    tray.setIcon(
-        app.style().standardIcon(QStyle.StandardPixmap.SP_MessageBoxInformation)
-    )
-    tray.setToolTip("Reading Assistant")
     menu = QMenu()
     show_act = QAction("Show Window", menu)
     hide_act = QAction("Hide Window", menu)
+    monitor_act = QAction("Monitor Clipboard", menu)
+    monitor_act.setCheckable(True)
     quit_act = QAction("Quit", menu)
     menu.addAction(show_act)
     menu.addAction(hide_act)
     menu.addSeparator()
+    menu.addAction(monitor_act)
+    menu.addSeparator()
     menu.addAction(quit_act)
     tray.setContextMenu(menu)
+
+    def set_monitoring(active: bool) -> None:
+        if active:
+            monitor.start()
+        else:
+            monitor.stop()
+        tray.setIcon(_build_tray_icon(active))
+        tray.setToolTip(
+            "Reading Assistant — monitoring" if active else "Reading Assistant — paused"
+        )
+        monitor_act.blockSignals(True)
+        monitor_act.setChecked(active)
+        monitor_act.blockSignals(False)
+        settings.setValue("monitoring", active)
+
+    set_monitoring(initial_monitoring)
     tray.show()
 
     try:
@@ -437,6 +495,7 @@ def main() -> int:
 
     show_act.triggered.connect(popup.show_and_raise)
     hide_act.triggered.connect(popup.hide)
+    monitor_act.toggled.connect(set_monitoring)
     quit_act.triggered.connect(app.quit)
     app.aboutToQuit.connect(popup.prepare_to_quit)
     tray.activated.connect(
@@ -444,8 +503,6 @@ def main() -> int:
         if reason == QSystemTrayIcon.Trigger
         else None
     )
-
-    monitor = ClipboardMonitor(app)
     monitor.newText.connect(popup.handle_clipboard_text)
 
     popup.show()
