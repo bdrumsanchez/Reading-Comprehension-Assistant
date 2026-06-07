@@ -7,7 +7,7 @@ ROOT = Path(__file__).resolve().parent
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-from PySide6.QtCore import Qt, QRect, QTimer, QObject, Signal, QThread, QSettings
+from PySide6.QtCore import Qt, QEvent, QRect, QTimer, QObject, Signal, QThread, QSettings
 from PySide6.QtGui import QAction, QCloseEvent, QColor, QIcon, QPainter, QPen, QPixmap
 from PySide6.QtWidgets import (
     QApplication,
@@ -70,17 +70,20 @@ def build_grounded_prompt(snippet: str, question: str, passages: list[dict]) -> 
 
 
 def _build_tray_icon(active: bool) -> QIcon:
-    pixmap = QPixmap(20, 16)
+    pixmap = QPixmap(22, 18)
     pixmap.fill(Qt.transparent)
     painter = QPainter(pixmap)
     painter.setRenderHint(QPainter.Antialiasing)
     color = QColor("#1c1c1c")
     painter.setPen(QPen(color, 1.4))
     painter.setBrush(color if active else Qt.NoBrush)
-    painter.drawRoundedRect(QRect(2, 1, 16, 14), 1, 1)
+    painter.drawRoundedRect(QRect(3, 2, 16, 14), 1.5, 1.5)
     spine_color = QColor("#ffffff") if active else color
     painter.setPen(QPen(spine_color, 1.2))
-    painter.drawLine(5, 2, 5, 14)
+    painter.drawLine(6, 3, 6, 15)
+    if not active:
+        painter.setPen(QPen(color, 1.6))
+        painter.drawLine(4, 15, 20, 3)
     painter.end()
     icon = QIcon(pixmap)
     icon.setIsMask(True)
@@ -159,6 +162,8 @@ class ClipboardMonitor(QObject):
 
 
 class PopupWindow(QWidget):
+    visibility_changed = Signal(bool)
+
     def __init__(self, llm: LLM) -> None:
         super().__init__()
         self.llm = llm
@@ -420,6 +425,14 @@ class PopupWindow(QWidget):
                 self._thread.terminate()
                 self._thread.wait(1000)
 
+    def showEvent(self, event: QEvent) -> None:  # noqa: N802
+        super().showEvent(event)
+        self.visibility_changed.emit(True)
+
+    def hideEvent(self, event: QEvent) -> None:  # noqa: N802
+        super().hideEvent(event)
+        self.visibility_changed.emit(False)
+
     def closeEvent(self, event: QCloseEvent) -> None:  # noqa: N802
         if not self._app_quitting:
             self._save_geometry()
@@ -443,6 +456,26 @@ def main() -> int:
     settings = QSettings("ReadingAssistant", "FloatingPopup")
     initial_monitoring = bool(settings.value("monitoring", True, type=bool))
 
+    try:
+        llm = LLM()
+    except Exception as exc:
+        QMessageBox.critical(
+            None,
+            "Reading Assistant",
+            "Could not initialize the LLM client.\n\n"
+            f"{exc}\n\n"
+            "Set OPENCODE_API_KEY in your environment or .env, "
+            "or ensure ~/.local/share/opencode/auth.json exists.",
+        )
+        return 1
+
+    popup = PopupWindow(llm)
+    popup._refresh_books()
+    if settings.value("geometry") is None:
+        screen = app.primaryScreen().availableGeometry()
+        popup.resize(460, 520)
+        popup.move(screen.right() - popup.width() - 20, screen.top() + 60)
+
     monitor = ClipboardMonitor(app)
 
     tray = QSystemTrayIcon(app)
@@ -460,11 +493,22 @@ def main() -> int:
     menu.addAction(quit_act)
     tray.setContextMenu(menu)
 
+    def update_window_actions() -> None:
+        if monitor.is_active:
+            show_act.setEnabled(not popup.isVisible())
+            hide_act.setEnabled(popup.isVisible())
+        else:
+            show_act.setEnabled(False)
+            hide_act.setEnabled(False)
+
     def set_monitoring(active: bool) -> None:
         if active:
             monitor.start()
+            popup.show_and_raise()
         else:
             monitor.stop()
+            if popup.isVisible():
+                popup.hide()
         tray.setIcon(_build_tray_icon(active))
         tray.setToolTip(
             "Reading Assistant — monitoring" if active else "Reading Assistant — paused"
@@ -473,41 +517,28 @@ def main() -> int:
         monitor_act.setChecked(active)
         monitor_act.blockSignals(False)
         settings.setValue("monitoring", active)
+        update_window_actions()
 
     set_monitoring(initial_monitoring)
     tray.show()
-
-    try:
-        llm = LLM()
-    except Exception as exc:
-        QMessageBox.critical(
-            None,
-            "Reading Assistant",
-            "Could not initialize the LLM client.\n\n"
-            f"{exc}\n\n"
-            "Set OPENCODE_API_KEY in your environment or .env, "
-            "or ensure ~/.local/share/opencode/auth.json exists.",
-        )
-        return 1
-
-    popup = PopupWindow(llm)
-    popup._refresh_books()
 
     show_act.triggered.connect(popup.show_and_raise)
     hide_act.triggered.connect(popup.hide)
     monitor_act.toggled.connect(set_monitoring)
     quit_act.triggered.connect(app.quit)
     app.aboutToQuit.connect(popup.prepare_to_quit)
-    tray.activated.connect(
-        lambda reason: popup.show_and_raise()
-        if reason == QSystemTrayIcon.Trigger
-        else None
-    )
-    monitor.newText.connect(popup.handle_clipboard_text)
 
-    popup.show()
-    screen = app.primaryScreen().availableGeometry()
-    popup.move(screen.right() - popup.width() - 20, screen.top() + 60)
+    def on_tray_activated(reason: QSystemTrayIcon.ActivationReason) -> None:
+        if reason != QSystemTrayIcon.Trigger:
+            return
+        if monitor.is_active:
+            popup.show_and_raise()
+        else:
+            menu.popup(tray.geometry().bottomLeft())
+
+    tray.activated.connect(on_tray_activated)
+    monitor.newText.connect(popup.handle_clipboard_text)
+    popup.visibility_changed.connect(update_window_actions)
 
     return app.exec()
 
