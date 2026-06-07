@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+import sys
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -8,8 +9,17 @@ from dotenv import load_dotenv
 
 load_dotenv()
 
-PROJECT_ROOT = Path(__file__).resolve().parent.parent
-DATA_DIR = PROJECT_ROOT / "data"
+
+def _data_root() -> Path:
+    if getattr(sys, "frozen", False):
+        root = Path.home() / "Library" / "Application Support" / "Reading Assistant"
+    else:
+        root = Path(__file__).resolve().parent.parent / "data"
+    root.mkdir(parents=True, exist_ok=True)
+    return root
+
+
+DATA_DIR = _data_root()
 BOOKS_DIR = DATA_DIR / "books"
 CACHE_DIR = DATA_DIR / "cache"
 CHROMA_DIR = CACHE_DIR / "chroma"

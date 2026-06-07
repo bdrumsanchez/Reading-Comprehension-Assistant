@@ -3,7 +3,10 @@ from __future__ import annotations
 import sys
 from pathlib import Path
 
-ROOT = Path(__file__).resolve().parent
+if getattr(sys, "frozen", False):
+    ROOT = Path(sys._MEIPASS)
+else:
+    ROOT = Path(__file__).resolve().parent
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
@@ -26,9 +29,6 @@ from PySide6.QtWidgets import (
 )
 
 from assistant.llm import LLM
-from assistant.store import VectorStore
-from assistant.embedder import Embedder
-from assistant.retriever import Retriever
 
 
 SYSTEM_PROMPT = (
@@ -302,22 +302,25 @@ class PopupWindow(QWidget):
                 self.book_combo.setCurrentIndex(idx)
         self.book_combo.blockSignals(False)
 
-    def _get_store(self) -> VectorStore | None:
+    def _get_store(self) -> VectorStore | None:  # noqa: F821
         if self._store is None:
             try:
+                from assistant.store import VectorStore
                 self._store = VectorStore()
             except Exception as exc:
                 self.status_label.setText(f"Index unavailable: {exc}")
                 return None
         return self._store
 
-    def _get_retriever(self) -> Retriever | None:
+    def _get_retriever(self) -> Retriever | None:  # noqa: F821
         if self._retriever is not None:
             return self._retriever
         store = self._get_store()
         if store is None:
             return None
         try:
+            from assistant.embedder import Embedder
+            from assistant.retriever import Retriever
             self._embedder = Embedder()
             self._retriever = Retriever(store, self._embedder)
         except Exception as exc:

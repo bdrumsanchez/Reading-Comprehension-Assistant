@@ -12,3 +12,7 @@ data/books/
 
 !data/books/.gitkeep
 !data/cache/.gitkeep
+
+# Build artefacts
+build/
+dist/
