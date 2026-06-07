@@ -16,3 +16,6 @@ data/books/
 # Build artefacts
 build/
 dist/
+Reading Assistant.app
+dist/
+build/
