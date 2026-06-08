@@ -21,12 +21,16 @@ from PySide6.QtWidgets import (
     QSizePolicy,
     QStyle,
     QSystemTrayIcon,
+    QTextBrowser,
     QTextEdit,
     QVBoxLayout,
     QWidget,
 )
 
 from assistant.llm import LLM
+
+YOUTUBE_API_KEY = "AIzaSyB1fl744-PE0tD6SWuzPeIvtx6jRROFxlk"
+YOUTUBE_SEARCH_URL = "https://www.googleapis.com/youtube/v3/search"
 from assistant.store import VectorStore
 from assistant.embedder import Embedder
 from assistant.retriever import Retriever
@@ -110,15 +114,58 @@ class ClipboardMonitor(QObject):
             text = self._clip.text()
         except Exception:
             return
-        if not text or text == self._last:
+        if not text:
+            return
+        if text == self._last:
             return
         if not text.strip():
             return
+        print(f"[clipboard] New text: {text[:60]}...")
         self._last = text
         self.newText.emit(text)
 
     def mark_seen(self, text: str) -> None:
         self._last = text or ""
+
+
+class YouTubeWorker(QObject):
+    finished = Signal()
+    failed = Signal(str)
+
+    def __init__(self, query: str) -> None:
+        super().__init__()
+        self.query = query
+        self.videos = []
+
+    def run(self) -> None:
+        try:
+            import requests
+            params = {
+                "part": "snippet",
+                "q": self.query[:200],
+                "key": YOUTUBE_API_KEY,
+                "maxResults": 3,
+                "type": "video",
+                "relevanceLanguage": "en",
+            }
+            print(f"[youtube] Searching for: {params['q'][:60]}...")
+            resp = requests.get(YOUTUBE_SEARCH_URL, params=params, timeout=10)
+            print(f"[youtube] Response status: {resp.status_code}")
+            resp.raise_for_status()
+            data = resp.json()
+            for item in data.get("items", []):
+                video_id = item["id"]["videoId"]
+                title = item["snippet"]["title"]
+                print(f"[youtube] Found: {title}")
+                self.videos.append({
+                    "title": title,
+                    "url": f"https://www.youtube.com/watch?v={video_id}",
+                })
+            print(f"[youtube] Found {len(self.videos)} videos total")
+            self.finished.emit()
+        except Exception as exc:
+            print(f"[youtube] Error: {exc}")
+            self.failed.emit(str(exc))
 
 
 class PopupWindow(QWidget):
@@ -131,6 +178,8 @@ class PopupWindow(QWidget):
         self._current_snippet = ""
         self._thread: QThread | None = None
         self._worker: LLMWorker | None = None
+        self._yt_thread: QThread | None = None
+        self._yt_worker: YouTubeWorker | None = None
         self._app_quitting = False
 
         self._settings = QSettings("ReadingAssistant", "FloatingPopup")
@@ -196,6 +245,12 @@ class PopupWindow(QWidget):
         self.response_view.setReadOnly(True)
         self.response_view.setPlaceholderText("The explanation will appear here.")
         outer.addWidget(self.response_view, 2)
+
+        self.yt_view = QTextBrowser()
+        self.yt_view.setVisible(False)
+        self.yt_view.setOpenExternalLinks(True)
+        self.yt_view.setMaximumHeight(100)
+        outer.addWidget(self.yt_view)
 
         self.status_label = QLabel("")
         self.status_label.setStyleSheet("color: #666;")
@@ -288,6 +343,8 @@ class PopupWindow(QWidget):
         self.snippet_view.setPlainText(text)
         self.response_view.clear()
         self.status_label.clear()
+        self.yt_view.setVisible(False)
+        self.yt_view.clear()
 
     def _on_reset(self) -> None:
         self._current_snippet = ""
@@ -295,6 +352,8 @@ class PopupWindow(QWidget):
         self.response_view.clear()
         self.question_input.clear()
         self.status_label.clear()
+        self.yt_view.setVisible(False)
+        self.yt_view.clear()
 
     def _on_ask(self) -> None:
         if self._thread is not None:
@@ -324,6 +383,8 @@ class PopupWindow(QWidget):
             user_prompt = build_snippet_prompt(snippet, question)
 
         self.response_view.clear()
+        self.yt_view.setVisible(False)
+        self.yt_view.clear()
         self.status_label.setText("Thinking…")
         self.ask_btn.setEnabled(False)
         self.question_input.setEnabled(False)
@@ -343,8 +404,11 @@ class PopupWindow(QWidget):
         self._thread.start()
 
     def _on_llm_done(self, text: str) -> None:
+        print("LLM done, starting YouTube search")
+        print(f"[_on_llm_done] explanation received ({len(text)} chars)")
         self.response_view.setPlainText(text)
         self.status_label.setText("Done.")
+        self._search_youtube()
 
     def _on_llm_failed(self, err: str) -> None:
         self.response_view.setPlainText(f"Error: {err}")
@@ -357,16 +421,91 @@ class PopupWindow(QWidget):
         self.question_input.setEnabled(True)
         self.reset_btn.setEnabled(True)
 
+    def _search_youtube(self) -> None:
+        if self._yt_thread is not None:
+            print("[_search_youtube] thread already running")
+            return
+        snippet = self._current_snippet.strip()
+        if not snippet:
+            print("[_search_youtube] no snippet")
+            return
+        query = snippet[:200]
+        print(f"[_search_youtube] searching for: {query[:60]}...")
+        self.status_label.setText("Done. Searching YouTube…")
+
+        self._yt_thread = QThread(self)
+        self._yt_worker = YouTubeWorker(query)
+        self._yt_worker.moveToThread(self._yt_thread)
+        self._yt_thread.started.connect(self._yt_worker.run)
+        self._yt_worker.finished.connect(self._on_youtube_done)
+        self._yt_worker.failed.connect(self._on_youtube_failed)
+        self._yt_worker.finished.connect(self._yt_thread.quit)
+        self._yt_worker.failed.connect(self._yt_thread.quit)
+        self._yt_thread.finished.connect(self._yt_worker.deleteLater)
+        self._yt_thread.finished.connect(self._yt_thread.deleteLater)
+        self._yt_thread.finished.connect(self._on_youtube_thread_finished)
+        self._yt_thread.start()
+
+    def _on_youtube_done(self) -> None:
+        print("[_on_youtube_done] called")
+        worker = self._yt_worker
+        if worker is None:
+            print("[_on_youtube_done] worker is None, aborting")
+            return
+        videos = worker.videos
+        print(f"[_on_youtube_done] got {len(videos)} videos")
+        if not videos:
+            print("[_on_youtube_done] no videos, aborting")
+            self.status_label.setText("Done.")
+            return
+        try:
+            import html as html_mod
+            lines = []
+            for v in videos:
+                escaped_title = html_mod.escape(v["title"])
+                print(f"[_on_youtube_done] video: '{v['title']}' -> {v['url']}")
+                lines.append(f'• <a href="{v["url"]}">{escaped_title}</a>')
+            html_content = (
+                '<div style="background:#1a73e8;color:#fff;border-radius:6px;'
+                f'padding:8px;font-size:12px;">'
+                '<b>📺 Related Videos</b><br>'
+                f'{"<br>".join(lines)}</div>'
+            )
+            print(f"[_on_youtube_done] HTML:\n{html_content}")
+            self.yt_view.setHtml(html_content)
+            print("[_on_youtube_done] setHtml succeeded")
+            self.yt_view.setVisible(True)
+            print("[_on_youtube_done] setVisible(True) succeeded")
+            print(f"[_on_youtube_done] yt_view.isVisible() = {self.yt_view.isVisible()}")
+            self.status_label.setText(f"Done. Found {len(videos)} videos.")
+        except Exception as exc:
+            print(f"[_on_youtube_done] EXCEPTION: {exc}")
+            import traceback
+            traceback.print_exc()
+            self.status_label.setText(f"Done. (display error: {exc})")
+
+    def _on_youtube_failed(self, err: str) -> None:
+        print(f"[youtube] FAILED: {err}")
+        self.status_label.setText(f"Done. (YouTube error: {err})")
+
+    def _on_youtube_thread_finished(self) -> None:
+        self._yt_thread = None
+        self._yt_worker = None
+
     def handle_clipboard_text(self, text: str) -> None:
+        print(f"[handle_clipboard_text] got {len(text)} chars")
         text = text.strip()
         if len(text) < MIN_SNIPPET_LEN:
+            print(f"[handle_clipboard_text] too short ({len(text)})")
             return
         if text == self._current_snippet:
+            print("[handle_clipboard_text] same as current")
             return
         self.set_snippet(text)
         if not self.isVisible():
             self.show()
             self.raise_()
+            print("[handle_clipboard_text] showed window")
         else:
             self.raise_()
 
@@ -382,6 +521,10 @@ class PopupWindow(QWidget):
             if not self._thread.wait(5000):
                 self._thread.terminate()
                 self._thread.wait(1000)
+        if self._yt_thread is not None and self._yt_thread.isRunning():
+            if not self._yt_thread.wait(5000):
+                self._yt_thread.terminate()
+                self._yt_thread.wait(1000)
 
     def closeEvent(self, event: QCloseEvent) -> None:  # noqa: N802
         if not self._app_quitting:
@@ -394,6 +537,10 @@ class PopupWindow(QWidget):
             if not self._thread.wait(5000):
                 self._thread.terminate()
                 self._thread.wait(1000)
+        if self._yt_thread is not None and self._yt_thread.isRunning():
+            if not self._yt_thread.wait(5000):
+                self._yt_thread.terminate()
+                self._yt_thread.wait(1000)
         event.accept()
 
 
@@ -445,7 +592,7 @@ def main() -> int:
         else None
     )
 
-    monitor = ClipboardMonitor(app)
+    monitor = ClipboardMonitor(app, popup)
     monitor.newText.connect(popup.handle_clipboard_text)
 
     popup.show()
