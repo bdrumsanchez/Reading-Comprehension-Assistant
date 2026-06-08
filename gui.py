@@ -429,8 +429,14 @@ class PopupWindow(QWidget):
         if not snippet:
             print("[_search_youtube] no snippet")
             return
-        query = snippet[:200]
-        print(f"[_search_youtube] searching for: {query[:60]}...")
+        query = self.llm.complete(
+            "You extract the main topic from a passage in 3-5 words. "
+            "Return ONLY the topic, no other text.",
+            f"Extract the main topic from this passage in 3-5 words:\n\n{snippet[:500]}",
+        ).strip()
+        if not query:
+            query = " ".join(snippet.split()[:3])
+        print(f"[_search_youtube] searching for: {query}")
         self.status_label.setText("Done. Searching YouTube…")
 
         self._yt_thread = QThread(self)
