@@ -3,15 +3,12 @@ from __future__ import annotations
 import sys
 from pathlib import Path
 
-if getattr(sys, "frozen", False):
-    ROOT = Path(sys._MEIPASS)
-else:
-    ROOT = Path(__file__).resolve().parent
+ROOT = Path(__file__).resolve().parent
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-from PySide6.QtCore import Qt, QEvent, QRect, QTimer, QObject, Signal, QThread, QSettings
-from PySide6.QtGui import QAction, QCloseEvent, QColor, QIcon, QPainter, QPen, QPixmap
+from PySide6.QtCore import Qt, QTimer, QObject, Signal, QThread, QSettings
+from PySide6.QtGui import QAction, QCloseEvent
 from PySide6.QtWidgets import (
     QApplication,
     QComboBox,
@@ -22,6 +19,7 @@ from PySide6.QtWidgets import (
     QMessageBox,
     QPushButton,
     QSizePolicy,
+    QStyle,
     QSystemTrayIcon,
     QTextEdit,
     QVBoxLayout,
@@ -29,6 +27,9 @@ from PySide6.QtWidgets import (
 )
 
 from assistant.llm import LLM
+from assistant.store import VectorStore
+from assistant.embedder import Embedder
+from assistant.retriever import Retriever
 
 
 SYSTEM_PROMPT = (
@@ -69,27 +70,6 @@ def build_grounded_prompt(snippet: str, question: str, passages: list[dict]) -> 
     )
 
 
-def _build_tray_icon(active: bool) -> QIcon:
-    pixmap = QPixmap(22, 18)
-    pixmap.fill(Qt.transparent)
-    painter = QPainter(pixmap)
-    painter.setRenderHint(QPainter.Antialiasing)
-    color = QColor("#1c1c1c")
-    painter.setPen(QPen(color, 1.4))
-    painter.setBrush(color if active else Qt.NoBrush)
-    painter.drawRoundedRect(QRect(3, 2, 16, 14), 1.5, 1.5)
-    spine_color = QColor("#ffffff") if active else color
-    painter.setPen(QPen(spine_color, 1.2))
-    painter.drawLine(6, 3, 6, 15)
-    if not active:
-        painter.setPen(QPen(color, 1.6))
-        painter.drawLine(4, 15, 20, 3)
-    painter.end()
-    icon = QIcon(pixmap)
-    icon.setIsMask(True)
-    return icon
-
-
 class LLMWorker(QObject):
     finished = Signal(str)
     failed = Signal(str)
@@ -123,27 +103,7 @@ class ClipboardMonitor(QObject):
         self._timer = QTimer(self)
         self._timer.setInterval(POLL_INTERVAL_MS)
         self._timer.timeout.connect(self._poll)
-        self._active = False
-
-    @property
-    def is_active(self) -> bool:
-        return self._active
-
-    def start(self) -> None:
-        if self._active:
-            return
-        try:
-            self._last = self._clip.text() or ""
-        except Exception:
-            self._last = ""
         self._timer.start()
-        self._active = True
-
-    def stop(self) -> None:
-        if not self._active:
-            return
-        self._timer.stop()
-        self._active = False
 
     def _poll(self) -> None:
         try:
@@ -162,8 +122,6 @@ class ClipboardMonitor(QObject):
 
 
 class PopupWindow(QWidget):
-    visibility_changed = Signal(bool)
-
     def __init__(self, llm: LLM) -> None:
         super().__init__()
         self.llm = llm
@@ -302,25 +260,22 @@ class PopupWindow(QWidget):
                 self.book_combo.setCurrentIndex(idx)
         self.book_combo.blockSignals(False)
 
-    def _get_store(self) -> VectorStore | None:  # noqa: F821
+    def _get_store(self) -> VectorStore | None:
         if self._store is None:
             try:
-                from assistant.store import VectorStore
                 self._store = VectorStore()
             except Exception as exc:
                 self.status_label.setText(f"Index unavailable: {exc}")
                 return None
         return self._store
 
-    def _get_retriever(self) -> Retriever | None:  # noqa: F821
+    def _get_retriever(self) -> Retriever | None:
         if self._retriever is not None:
             return self._retriever
         store = self._get_store()
         if store is None:
             return None
         try:
-            from assistant.embedder import Embedder
-            from assistant.retriever import Retriever
             self._embedder = Embedder()
             self._retriever = Retriever(store, self._embedder)
         except Exception as exc:
@@ -428,14 +383,6 @@ class PopupWindow(QWidget):
                 self._thread.terminate()
                 self._thread.wait(1000)
 
-    def showEvent(self, event: QEvent) -> None:  # noqa: N802
-        super().showEvent(event)
-        self.visibility_changed.emit(True)
-
-    def hideEvent(self, event: QEvent) -> None:  # noqa: N802
-        super().hideEvent(event)
-        self.visibility_changed.emit(False)
-
     def closeEvent(self, event: QCloseEvent) -> None:  # noqa: N802
         if not self._app_quitting:
             self._save_geometry()
@@ -456,8 +403,21 @@ def main() -> int:
     app.setApplicationName("Reading Assistant")
     app.setOrganizationName("ReadingAssistant")
 
-    settings = QSettings("ReadingAssistant", "FloatingPopup")
-    initial_monitoring = bool(settings.value("monitoring", True, type=bool))
+    tray = QSystemTrayIcon(app)
+    tray.setIcon(
+        app.style().standardIcon(QStyle.StandardPixmap.SP_MessageBoxInformation)
+    )
+    tray.setToolTip("Reading Assistant")
+    menu = QMenu()
+    show_act = QAction("Show Window", menu)
+    hide_act = QAction("Hide Window", menu)
+    quit_act = QAction("Quit", menu)
+    menu.addAction(show_act)
+    menu.addAction(hide_act)
+    menu.addSeparator()
+    menu.addAction(quit_act)
+    tray.setContextMenu(menu)
+    tray.show()
 
     try:
         llm = LLM()
@@ -474,74 +434,23 @@ def main() -> int:
 
     popup = PopupWindow(llm)
     popup._refresh_books()
-    if settings.value("geometry") is None:
-        screen = app.primaryScreen().availableGeometry()
-        popup.resize(460, 520)
-        popup.move(screen.right() - popup.width() - 20, screen.top() + 60)
-
-    monitor = ClipboardMonitor(app)
-
-    tray = QSystemTrayIcon(app)
-    menu = QMenu()
-    show_act = QAction("Show Window", menu)
-    hide_act = QAction("Hide Window", menu)
-    monitor_act = QAction("Monitor Clipboard", menu)
-    monitor_act.setCheckable(True)
-    quit_act = QAction("Quit", menu)
-    menu.addAction(show_act)
-    menu.addAction(hide_act)
-    menu.addSeparator()
-    menu.addAction(monitor_act)
-    menu.addSeparator()
-    menu.addAction(quit_act)
-    tray.setContextMenu(menu)
-
-    def update_window_actions() -> None:
-        if monitor.is_active:
-            show_act.setEnabled(not popup.isVisible())
-            hide_act.setEnabled(popup.isVisible())
-        else:
-            show_act.setEnabled(False)
-            hide_act.setEnabled(False)
-
-    def set_monitoring(active: bool) -> None:
-        if active:
-            monitor.start()
-            popup.show_and_raise()
-        else:
-            monitor.stop()
-            if popup.isVisible():
-                popup.hide()
-        tray.setIcon(_build_tray_icon(active))
-        tray.setToolTip(
-            "Reading Assistant — monitoring" if active else "Reading Assistant — paused"
-        )
-        monitor_act.blockSignals(True)
-        monitor_act.setChecked(active)
-        monitor_act.blockSignals(False)
-        settings.setValue("monitoring", active)
-        update_window_actions()
-
-    set_monitoring(initial_monitoring)
-    tray.show()
 
     show_act.triggered.connect(popup.show_and_raise)
     hide_act.triggered.connect(popup.hide)
-    monitor_act.toggled.connect(set_monitoring)
     quit_act.triggered.connect(app.quit)
     app.aboutToQuit.connect(popup.prepare_to_quit)
+    tray.activated.connect(
+        lambda reason: popup.show_and_raise()
+        if reason == QSystemTrayIcon.Trigger
+        else None
+    )
 
-    def on_tray_activated(reason: QSystemTrayIcon.ActivationReason) -> None:
-        if reason != QSystemTrayIcon.Trigger:
-            return
-        if monitor.is_active:
-            popup.show_and_raise()
-        else:
-            menu.popup(tray.geometry().bottomLeft())
-
-    tray.activated.connect(on_tray_activated)
+    monitor = ClipboardMonitor(app)
     monitor.newText.connect(popup.handle_clipboard_text)
-    popup.visibility_changed.connect(update_window_actions)
+
+    popup.show()
+    screen = app.primaryScreen().availableGeometry()
+    popup.move(screen.right() - popup.width() - 20, screen.top() + 60)
 
     return app.exec()
 

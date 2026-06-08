@@ -14,6 +14,9 @@ load_dotenv()
 
 from assistant.llm import LLM
 
+YOUTUBE_API_KEY = "AIzaSyB1fl744-PE0tD6SWuzPeIvtx6jRROFxlk"
+YOUTUBE_SEARCH_URL = "https://www.googleapis.com/youtube/v3/search"
+
 app = Flask(__name__)
 
 SYSTEM_PROMPT = (
@@ -58,6 +61,42 @@ def ask():
         return jsonify({"error": str(exc)}), 500
 
     return jsonify({"answer": answer})
+
+
+@app.route("/api/youtube-search", methods=["POST"])
+def youtube_search():
+    body = request.get_json(silent=True)
+    if not body:
+        return jsonify({"error": "Request body is required"}), 400
+
+    query = (body.get("query") or "").strip()
+    if not query:
+        return jsonify({"error": "Query is required"}), 400
+
+    try:
+        import requests
+        params = {
+            "part": "snippet",
+            "q": query[:200],
+            "key": YOUTUBE_API_KEY,
+            "maxResults": 3,
+            "type": "video",
+            "relevanceLanguage": "en",
+        }
+        resp = requests.get(YOUTUBE_SEARCH_URL, params=params, timeout=10)
+        resp.raise_for_status()
+        data = resp.json()
+        videos = []
+        for item in data.get("items", []):
+            video_id = item["id"]["videoId"]
+            title = item["snippet"]["title"]
+            videos.append({
+                "title": title,
+                "url": f"https://www.youtube.com/watch?v={video_id}",
+            })
+        return jsonify({"videos": videos})
+    except Exception as exc:
+        return jsonify({"error": str(exc)}), 500
 
 
 def main() -> None:

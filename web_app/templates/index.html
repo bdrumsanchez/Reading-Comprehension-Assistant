@@ -196,6 +196,7 @@
         response.innerHTML = `<span class="error">${escapeHtml(data.error)}</span>`;
       } else {
         response.innerHTML = formatAnswer(data.answer);
+        searchYoutube(passageText);
       }
     } catch (err) {
       response.innerHTML = `<span class="error">Network error: ${escapeHtml(err.message)}</span>`;
@@ -211,6 +212,25 @@
 
   function formatAnswer(text) {
     return text.split('\n').filter(Boolean).map(p => `<p>${escapeHtml(p)}</p>`).join('');
+  }
+
+  async function searchYoutube(query) {
+    try {
+      const res = await fetch('/api/youtube-search', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ query: query.substring(0, 200) }),
+      });
+      const data = await res.json();
+      if (data.videos && data.videos.length > 0) {
+        const html = data.videos.map(v =>
+          `<p>📺 <a href="${escapeHtml(v.url)}" target="_blank" rel="noopener">${escapeHtml(v.title)}</a></p>`
+        ).join('');
+        response.innerHTML += `<hr><strong>Related Videos:</strong>${html}`;
+      }
+    } catch (err) {
+      // silently fail
+    }
   }
 
   function escapeHtml(s) {
